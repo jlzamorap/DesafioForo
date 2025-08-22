@@ -1,119 +1,108 @@
 package com.aluraCursos.DesafioForo.controllers;
 
+import com.aluraCursos.DesafioForo.curso.CursoRepository;
 import com.aluraCursos.DesafioForo.topico.*;
+import com.aluraCursos.DesafioForo.usuario.UsuarioRepository;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
 import org.springframework.data.web.PageableDefault;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.util.UriComponentsBuilder;
 
-import java.net.URI;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.util.Optional;
-
 @RestController
 @RequestMapping("topicos")
+@SecurityRequirement(name = "bearer-key")
 public class TopicoController {
 
     @Autowired
     private TopicoRepository repository;
 
+    @Autowired
+    private UsuarioRepository usuarioRepository;
+    @Autowired
+    private CursoRepository cursoRepository;
+
     @Transactional
     @PostMapping
-    public ResponseEntity<DatosDetalleTopico> registrar(@RequestBody @Valid DatosRegistroTopico datosRegistro,
-                                                              UriComponentsBuilder uriBuilder) {
-        Optional<Topico> topicoExistente = repository.findByTituloAndMensaje(datosRegistro.titulo(), datosRegistro.mensaje());
-        if (topicoExistente.isPresent()) {
-            return ResponseEntity.status(HttpStatus.CONFLICT).build();
+    public ResponseEntity registrar(@RequestBody @Valid DatosRegistroTopico datos, UriComponentsBuilder uriComponentsBuilder) {
+
+        var autor = usuarioRepository.findByNombre(datos.nombreAutor());
+        var curso = cursoRepository.findByNombre(datos.nombreCurso());
+
+        // Verificar si las entidades existen (manejo de errores)
+        if (autor == null || curso == null) {
+            // Devolver un error 404 Not Found si el autor o el curso no existen
+            return ResponseEntity.notFound().build();
         }
-        Topico topico = new Topico(datosRegistro);
+
+        // Crear el nuevo tópico, ahora con las entidades de autor y curso asociadas
+        var topico = new Topico(datos, autor, curso);
         repository.save(topico);
 
-        URI url = uriBuilder.path("/topicos/{id}").buildAndExpand(topico.getId()).toUri();
-        return ResponseEntity.created(url).body(new DatosDetalleTopico(topico));
+        var uri = uriComponentsBuilder.path("/topicos/{id}").buildAndExpand(topico.getId()).toUri();
+
+        return ResponseEntity.created(uri).body(new DatosDetalleTopico(topico));
+
     }
 
     @GetMapping
-    public ResponseEntity<Page<DatosListaTopico>> listar(
-            @PageableDefault(size = 10, sort = "fechaCreacion", direction = Sort.Direction.ASC) Pageable paginacion,
-            @RequestParam(required = false) String curso,
-            @RequestParam(required = false) Integer anio) {
+    public ResponseEntity<Page<DatosListaTopico>> listar(@PageableDefault(size=10, sort = {"titulo"}) Pageable paginacion){
 
-        Page<Topico> topicos;
+        var page = repository.findByStatus(StatusTopico.ACTIVO, paginacion)
+                .map(DatosListaTopico::new);
 
-        if (curso != null && anio != null) {
-            // Filtrar por curso y año
-            LocalDateTime fechaInicio = LocalDate.of(anio, 1, 1).atStartOfDay();
-            LocalDateTime fechaFin = LocalDate.of(anio, 12, 31).atTime(23, 59, 59);
-            topicos = repository.findByCursoNombreAndFechaCreacionBetween(curso, fechaInicio, fechaFin, paginacion);
-        } else {
-            // Listar todos los tópicos con paginación y ordenación por defecto
-            topicos = repository.findAll(paginacion);
-        }
-        return ResponseEntity.ok(topicos.map(DatosListaTopico::new));
+        return ResponseEntity.ok(page);
+
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<DatosDetalleTopico> detalleTopico(@PathVariable Long id) {
-        return repository.findById(id)
-                .map(topico -> ResponseEntity.ok(new DatosDetalleTopico(topico)))
-                .orElse(ResponseEntity.notFound().build());
+    public ResponseEntity detallarTopico(@PathVariable Long id){
+        var topico = repository.findById(id);
+        if (topico.isPresent()) {
+            return ResponseEntity.ok(new DatosDetalleTopico(topico.get()));
+        } else {
+            return ResponseEntity.notFound().build();
+        }
     }
 
     @Transactional
-    @PutMapping("/{id}")
-    public ResponseEntity<DatosDetalleTopico> actualizarTopico(@PathVariable Long id,
-                                                               @RequestBody @Valid DatosActualizarTopico datosActualizacion) {
-        Optional<Topico> optionalTopico = repository.findById(id);
-        if (optionalTopico.isEmpty()) {
-            return ResponseEntity.notFound().build(); // 404 si no existe
-        }
-        Topico topico = optionalTopico.get();
+    @PutMapping
+    public ResponseEntity actualizar(@RequestBody @Valid DatosActualizarTopico datos){
+        // 1. Encuentra el tópico de forma segura usando findById
+        var optionalTopico = repository.findById(datos.id());
+        // 2. Verifica si el tópico existe
+        if (optionalTopico.isPresent()) {
+            var topico = optionalTopico.get();
+            // 3. Delega la lógica de actualización a la entidad
+            topico.actualizarInformaciones(datos);
 
-        if (datosActualizacion.titulo() != null && datosActualizacion.mensaje() != null) {
-            Optional<Topico> duplicado = repository.findByTituloAndMensaje(
-                    datosActualizacion.titulo(),
-                    datosActualizacion.mensaje()
-            );
-            if (duplicado.isPresent() && !duplicado.get().getId().equals(id)) {
-                return ResponseEntity.status(HttpStatus.CONFLICT).build(); // 409 si ya existe otro igual
-            }
+            return ResponseEntity.ok(new DatosDetalleTopico(topico));
+        } else {
+            // 4. Devuelve 404 Not Found si no existe
+            return ResponseEntity.notFound().build();
         }
-        // Actualizar solo los campos que no sean nulos
-        if (datosActualizacion.titulo() != null) {
-            topico.setTitulo(datosActualizacion.titulo());
-        }
-        if (datosActualizacion.mensaje() != null) {
-            topico.setMensaje(datosActualizacion.mensaje());
-        }
-        if (datosActualizacion.status() != null) {
-            topico.setStatus(datosActualizacion.status());
-        }
-
-        return ResponseEntity.ok(new DatosDetalleTopico(topico));
     }
 
     @Transactional
     @DeleteMapping("/{id}")
-    public ResponseEntity<Void> eliminarTopico(@PathVariable Long id) {
-        // 1. Verificar si el tópico existe
-        Optional<Topico> topicoOptional = repository.findById(id);
+    public ResponseEntity<Void> eliminar(@PathVariable Long id){
 
-        if (topicoOptional.isPresent()) {
-            // 2. Si el tópico existe, eliminarlo de la base de datos
-            repository.deleteById(id);
-            // 3. Devolver una respuesta sin contenido (204 No Content)
+        var optionalTopico = repository.findById(id);
+
+        if (optionalTopico.isPresent()) {
+            var topico = optionalTopico.get();
+
+            topico.eliminar();
+
             return ResponseEntity.noContent().build();
         } else {
-            // 4. Si el tópico no existe, devolver un error 404 Not Found
             return ResponseEntity.notFound().build();
         }
     }
 }
+
